@@ -1,0 +1,67 @@
+name: Create Issues in All Org Repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: 'GitHub Organization name'
+        required: true
+        type: string
+      issue_title:
+        description: 'Title for the created issue'
+        required: true
+        type: string
+      issue_body:
+        description: 'Body for the created issue'
+        required: true
+        type: string
+
+jobs:
+  create-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up GitHub CLI
+        uses: cli/gh-action@v2
+
+      - name: List all repos in org
+        id: list_repos
+        run: |
+          ORG="${{ github.event.inputs.org }}"
+          PAGE=1
+          PER_PAGE=100
+          echo "[]" > repos.json
+          while :; do
+            # Fetch a page of repos
+            gh repo list "$ORG" --json name --limit $PER_PAGE --page $PAGE > repos_page.json
+            # If the page is empty, break
+            if [ "$(jq length repos_page.json)" -eq 0 ]; then
+              break
+            fi
+            # Merge with the main repos.json
+            jq -s '.[0] + .[1]' repos.json repos_page.json > repos_tmp.json
+            mv repos_tmp.json repos.json
+            PAGE=$((PAGE+1))
+          done
+          cat repos.json
+
+      - name: Create issues in all repos
+        id: create_issues
+        run: |
+          ISSUE_TITLE="${{ github.event.inputs.issue_title }}"
+          ISSUE_BODY="${{ github.event.inputs.issue_body }}"
+          ORG="${{ github.event.inputs.org }}"
+          echo "[]" > created_issues.json
+          jq -r '.[].name' repos.json | while read repo; do
+            echo "Creating issue in $ORG/$repo"
+            ISSUE_JSON=$(gh issue create --repo "$ORG/$repo" --title "$ISSUE_TITLE" --body "$ISSUE_BODY" --label "automated" --json number,url)
+            ISSUE_NUMBER=$(echo "$ISSUE_JSON" | jq -r '.number')
+            gh issue edit --repo "$ORG/$repo" "$ISSUE_NUMBER" --add-assignee @copilot
+            # Save the repo and issue id/url to created_issues.json
+            jq -n --arg repo "$repo" --argjson issue "$ISSUE_JSON" '{repo: $repo, issue: $issue}' > issue_tmp.json
+            jq -s '.[0] + [.[1]]' created_issues.json issue_tmp.json > issues_tmp.json
+            mv issues_tmp.json created_issues.json
+          done
+          cat created_issues.json
