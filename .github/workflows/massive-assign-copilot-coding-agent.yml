@@ -25,6 +25,8 @@ jobs:
 
       - name: Set up GitHub CLI
         uses: cli/gh-action@v2
+        with:
+          token: ${{ secrets.ACCESS_TOKEN }}
 
       - name: List all repos in org
         id: list_repos
