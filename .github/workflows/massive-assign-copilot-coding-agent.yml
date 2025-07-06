@@ -55,16 +55,29 @@ jobs:
           ISSUE_BODY="${{ github.event.inputs.issue_body }}"
           ORG="${{ github.event.inputs.org }}"
           echo "[]" > created_issues.json
+          echo "[]" > failed_issues.json
           jq -r '.[].name' repos.json | while read repo; do
             echo "Creating issue in $ORG/$repo"
-            ISSUE_JSON=$(gh issue create --repo "$ORG/$repo" --title "$ISSUE_TITLE" --body "$ISSUE_BODY")
-            ISSUE_NUMBER=$(echo "$ISSUE_JSON" | sed -E 's|.*/issues/([0-9]+).*|\1|')
-            gh issue edit --repo "$ORG/$repo" "$ISSUE_NUMBER" --add-assignee @copilot
-            # Save the repo and issue id/url to created_issues.json
-            jq -n --arg repo "$repo" --arg issue "$ISSUE_JSON" '{repo: $repo, issue: $issue}' > issue_tmp.json
-            jq -s '.[0] + [.[1]]' created_issues.json issue_tmp.json > issues_tmp.json
-            mv issues_tmp.json created_issues.json
+            set +e
+            ISSUE_JSON=$(gh issue create --repo "$ORG/$repo" --title "$ISSUE_TITLE" --body "$ISSUE_BODY" 2>&1)
+            STATUS=$?
+            if [ $STATUS -eq 0 ]; then
+              ISSUE_NUMBER=$(echo "$ISSUE_JSON" | sed -E 's|.*/issues/([0-9]+).*|\1|')
+              gh issue edit --repo "$ORG/$repo" "$ISSUE_NUMBER" --add-assignee @copilot
+              jq -n --arg repo "$repo" --arg issue "$ISSUE_JSON" '{repo: $repo, issue: $issue}' > issue_tmp.json
+              jq -s '.[0] + [.[1]]' created_issues.json issue_tmp.json > issues_tmp.json
+              mv issues_tmp.json created_issues.json
+            else
+              echo "Failed to create issue in $ORG/$repo"
+              jq -n --arg repo "$repo" --arg error "$ISSUE_JSON" '{repo: $repo, error: $error}' > fail_tmp.json
+              jq -s '.[0] + [.[1]]' failed_issues.json fail_tmp.json > fail_issues_tmp.json
+              mv fail_issues_tmp.json failed_issues.json
+            fi
+            set -e
           done
+          echo "Created issues:"
           cat created_issues.json
+          echo "Failed issues:"
+          cat failed_issues.json
         env:
           GH_TOKEN: ${{ secrets.ACCESS_TOKEN }}
