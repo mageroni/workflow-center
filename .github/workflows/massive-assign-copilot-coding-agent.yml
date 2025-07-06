@@ -31,8 +31,10 @@ jobs:
           PER_PAGE=100
           echo "[]" > repos.json
           while :; do
-            # Fetch a page of repos
-            gh repo list "$ORG" --json name --limit $PER_PAGE --page $PAGE > repos_page.json
+            # Fetch a page of repos with the correct headers and access token
+            gh api -H "Accept: application/vnd.github+json" \
+                   -H "Authorization: Bearer $GH_TOKEN" \
+                   "/orgs/$ORG/repos?per_page=$PER_PAGE&page=$PAGE" > repos_page.json
             # If the page is empty, break
             if [ "$(jq length repos_page.json)" -eq 0 ]; then
               break
