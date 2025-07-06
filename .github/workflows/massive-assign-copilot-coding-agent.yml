@@ -57,7 +57,7 @@ jobs:
           echo "[]" > created_issues.json
           jq -r '.[].name' repos.json | while read repo; do
             echo "Creating issue in $ORG/$repo"
-            ISSUE_JSON=$(gh issue create --repo "$ORG/$repo" --title "$ISSUE_TITLE" --body "$ISSUE_BODY" --label "automated")
+            ISSUE_JSON=$(gh issue create --repo "$ORG/$repo" --title "$ISSUE_TITLE" --body "$ISSUE_BODY")
             ISSUE_NUMBER=$(echo "$ISSUE_JSON" | sed -E 's|.*/issues/([0-9]+).*|\1|')
             gh issue edit --repo "$ORG/$repo" "$ISSUE_NUMBER" --add-assignee @copilot
             # Save the repo and issue id/url to created_issues.json
