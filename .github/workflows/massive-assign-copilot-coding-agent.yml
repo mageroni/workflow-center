@@ -60,9 +60,9 @@ jobs:
             gh issue edit --repo "$ORG/$repo" "$ISSUE_NUMBER" --add-assignee @copilot
             # Save the repo and issue id/url to created_issues.json
             jq -n --arg repo "$repo" --argjson issue "$ISSUE_JSON" '{repo: $repo, issue: $issue}' > issue_tmp.json
-        env:
-          GH_TOKEN: ${{ secrets.ACCESS_TOKEN }}
             jq -s '.[0] + [.[1]]' created_issues.json issue_tmp.json > issues_tmp.json
             mv issues_tmp.json created_issues.json
           done
           cat created_issues.json
+        env:
+          GH_TOKEN: ${{ secrets.ACCESS_TOKEN }}
