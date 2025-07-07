@@ -1,0 +1,248 @@
+name: Azure P2S VPN Connection Setup
+
+on:
+  workflow_dispatch:
+    inputs:
+      azure_subscription_id:
+        description: 'Azure Subscription ID'
+        required: true
+        type: string
+      resource_group:
+        description: 'Resource Group containing the VPN Gateway'
+        required: true
+        type: string
+      vpn_gateway_name:
+        description: 'Virtual Network Gateway Name'
+        required: true
+        type: string
+      client_certificate_name:
+        description: 'P2S Client Certificate Name (optional)'
+        required: false
+        type: string
+        default: 'P2SClientCert'
+      test_connection:
+        description: 'Test VPN connection after setup'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  AZURE_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
+  RESOURCE_GROUP: ${{ inputs.resource_group }}
+  VPN_GATEWAY_NAME: ${{ inputs.vpn_gateway_name }}
+  CLIENT_CERT_NAME: ${{ inputs.client_certificate_name }}
+
+jobs:
+  setup-p2s-vpn:
+    runs-on: macos-latest
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install OpenVPN
+      run: |
+        echo "Installing OpenVPN via Homebrew..."
+        brew update
+        brew install openvpn
+        
+        # Verify installation
+        openvpn --version
+
+    - name: Install Azure CLI
+      run: |
+        echo "Installing Azure CLI..."
+        brew update
+        brew install azure-cli
+        
+        # Verify installation
+        az version
+
+    - name: Azure Login (OIDC)
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Set Azure Subscription
+      run: |
+        az account set --subscription ${{ env.AZURE_SUBSCRIPTION_ID }}
+        az account show
+
+    - name: Generate P2S VPN Client Configuration
+      id: vpn-config
+      run: |
+        echo "Generating P2S VPN client configuration..."
+        
+        # Generate VPN client configuration package
+        config_url=$(az network vnet-gateway vpn-client generate \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --name ${{ env.VPN_GATEWAY_NAME }} \
+          --authentication-method EAPTLS \
+          --query 'value' -o tsv)
+        
+        echo "VPN Client configuration URL: $config_url"
+        echo "vpn_config_url=$config_url" >> $GITHUB_OUTPUT
+        
+        # Download the configuration package
+        curl -L -o vpn-client-config.zip "$config_url"
+        
+        # Extract the configuration
+        unzip -q vpn-client-config.zip
+        ls -la
+
+    - name: Setup Client Certificates
+      id: client-certs
+      run: |
+        echo "Setting up client certificates..."
+        
+        # Create certificates directory
+        mkdir -p ~/vpn-certs
+        
+        # Check if client certificate is provided as secret
+        if [ -n "${{ secrets.P2S_CLIENT_CERT }}" ] && [ -n "${{ secrets.P2S_CLIENT_KEY }}" ]; then
+          echo "Using provided client certificate from secrets..."
+          echo "${{ secrets.P2S_CLIENT_CERT }}" > ~/vpn-certs/client.crt
+          echo "${{ secrets.P2S_CLIENT_KEY }}" > ~/vpn-certs/client.key
+          
+          # Set proper permissions
+          chmod 600 ~/vpn-certs/client.key
+          chmod 644 ~/vpn-certs/client.crt
+          
+          echo "client_cert_path=~/vpn-certs/client.crt" >> $GITHUB_OUTPUT
+          echo "client_key_path=~/vpn-certs/client.key" >> $GITHUB_OUTPUT
+        else
+          echo "No client certificate provided in secrets. You may need to configure certificate authentication."
+          echo "Please ensure P2S_CLIENT_CERT and P2S_CLIENT_KEY secrets are set if using certificate authentication."
+        fi
+
+    - name: Configure OpenVPN Client
+      run: |
+        echo "Configuring OpenVPN client..."
+        
+        # Find the OpenVPN configuration file in the extracted package
+        if [ -f "OpenVPN/VpnSettings.xml" ]; then
+          echo "Found VpnSettings.xml, extracting configuration..."
+          
+          # Extract server information from VpnSettings.xml
+          SERVER=$(grep -o '<VpnServer>[^<]*</VpnServer>' OpenVPN/VpnSettings.xml | sed 's/<[^>]*>//g')
+          echo "VPN Server: $SERVER"
+          
+          # Create OpenVPN configuration file
+          cat > ~/vpn-client.ovpn << EOF
+        client
+        dev tun
+        proto udp
+        remote $SERVER 1194
+        resolv-retry infinite
+        nobind
+        persist-key
+        persist-tun
+        ca ca.crt
+        verb 3
+        auth-user-pass
+        route-method exe
+        route-delay 2
+        EOF
+          
+          # Copy CA certificate if available
+          if [ -f "OpenVPN/ca.crt" ]; then
+            cp OpenVPN/ca.crt ~/ca.crt
+          fi
+          
+        elif [ -f "Generic/VpnSettings.xml" ]; then
+          echo "Found Generic VPN settings..."
+          # Handle generic configuration
+          cp Generic/VpnSettings.xml ~/vpn-settings.xml
+        else
+          echo "Warning: No recognized VPN configuration found in the package"
+          ls -la OpenVPN/ 2>/dev/null || echo "No OpenVPN directory"
+          ls -la Generic/ 2>/dev/null || echo "No Generic directory"
+        fi
+        
+        # If client certificates are available, add them to the config
+        if [ -n "${{ steps.client-certs.outputs.client_cert_path }}" ]; then
+          echo "cert ${{ steps.client-certs.outputs.client_cert_path }}" >> ~/vpn-client.ovpn
+          echo "key ${{ steps.client-certs.outputs.client_key_path }}" >> ~/vpn-client.ovpn
+        fi
+
+    - name: Test VPN Connection (Optional)
+      if: ${{ github.event.inputs.test_connection == 'true' }}
+      run: |
+        echo "Testing VPN connection..."
+        
+        # Note: This is a basic connectivity test
+        # In a real scenario, you might want to connect and test specific resources
+        
+        if [ -f ~/vpn-client.ovpn ]; then
+          echo "OpenVPN configuration file created successfully"
+          echo "Configuration file contents:"
+          cat ~/vpn-client.ovpn
+          
+          # Test configuration syntax
+          sudo openvpn --config ~/vpn-client.ovpn --verb 3 --connect-timeout 10 &
+          VPN_PID=$!
+          
+          # Wait a moment for connection attempt
+          sleep 15
+          
+          # Check if VPN process is still running
+          if kill -0 $VPN_PID 2>/dev/null; then
+            echo "VPN connection appears to be establishing..."
+            # Kill the process for this test
+            sudo kill $VPN_PID
+          else
+            echo "VPN connection test completed"
+          fi
+        else
+          echo "No OpenVPN configuration file found to test"
+        fi
+
+    - name: Save VPN Configuration Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: vpn-configuration
+        path: |
+          ~/vpn-client.ovpn
+          ~/ca.crt
+          ~/vpn-certs/
+        retention-days: 1
+
+    - name: Display Connection Instructions
+      run: |
+        echo "=================================="
+        echo "VPN Setup Complete!"
+        echo "=================================="
+        echo ""
+        echo "To connect to your Azure VPN:"
+        echo "1. Download the 'vpn-configuration' artifact from this workflow run"
+        echo "2. Extract the files to a secure location"
+        echo "3. Connect using OpenVPN:"
+        echo "   sudo openvpn --config vpn-client.ovpn"
+        echo ""
+        echo "Required secrets for this workflow:"
+        echo "- AZURE_CLIENT_ID: Azure service principal client ID"
+        echo "- AZURE_TENANT_ID: Azure tenant ID"
+        echo "- P2S_CLIENT_CERT: Base64 encoded client certificate (optional)"
+        echo "- P2S_CLIENT_KEY: Base64 encoded client private key (optional)"
+        echo ""
+        echo "Note: Ensure your Azure VPN Gateway is configured for P2S connections"
+        echo "with the appropriate authentication method (certificate or Azure AD)."
+        echo ""
+        echo "Security reminder: The configuration files contain sensitive information."
+        echo "Handle them securely and delete them when no longer needed."
+
+    - name: Cleanup Sensitive Files
+      if: always()
+      run: |
+        echo "Cleaning up sensitive files..."
+        rm -f ~/vpn-client.ovpn
+        rm -f ~/ca.crt
+        rm -rf ~/vpn-certs/
+        rm -f vpn-client-config.zip
+        rm -rf OpenVPN/
+        rm -rf Generic/
