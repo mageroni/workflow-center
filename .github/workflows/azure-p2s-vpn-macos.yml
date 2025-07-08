@@ -43,6 +43,11 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Check Runner Public IP
+      run: |
+        echo "Checking public IP address of the runner..."
+        curl ifconfig.me
+
     - name: Install OpenVPN
       run: |
         echo "Installing OpenVPN via Homebrew..."
