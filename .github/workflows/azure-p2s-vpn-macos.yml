@@ -259,23 +259,23 @@ jobs:
           
           # Create OpenVPN configuration file as fallback
           cat > ~/vpn-client.ovpn << EOF
-client
-dev tun
-proto udp
-remote $SERVER $PORT
-resolv-retry infinite
-nobind
-persist-key
-persist-tun
-ca ca.crt
-verb 3
-auth-user-pass
-route-method exe
-route-delay 2
-tls-version-min 1.2
-cipher AES-256-GCM
-auth SHA256
-EOF
+          client
+          dev tun
+          proto udp
+          remote $SERVER $PORT
+          resolv-retry infinite
+          nobind
+          persist-key
+          persist-tun
+          ca ca.crt
+          verb 3
+          auth-user-pass
+          route-method exe
+          route-delay 2
+          tls-version-min 1.2
+          cipher AES-256-GCM
+          auth SHA256
+          EOF
           
           echo "Created OpenVPN configuration from XML"
           
