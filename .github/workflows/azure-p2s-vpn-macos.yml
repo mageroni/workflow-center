@@ -144,20 +144,20 @@ jobs:
         echo "Setting up client certificates..."
         
         # Create certificates directory
-        mkdir -p ~/vpn-certs
+        mkdir -p $HOME/vpn-certs
         
         # Check if client certificate is provided as secret
         if [ -n "${{ secrets.P2S_CLIENT_CERT }}" ] && [ -n "${{ secrets.P2S_CLIENT_KEY }}" ]; then
           echo "Using provided client certificate from secrets..."
-          echo "${{ secrets.P2S_CLIENT_CERT }}" > ~/vpn-certs/client.crt
-          echo "${{ secrets.P2S_CLIENT_KEY }}" > ~/vpn-certs/client.key
+          echo "${{ secrets.P2S_CLIENT_CERT }}" > $HOME/vpn-certs/client.crt
+          echo "${{ secrets.P2S_CLIENT_KEY }}" > $HOME/vpn-certs/client.key
           
           # Set proper permissions
-          chmod 600 ~/vpn-certs/client.key
-          chmod 644 ~/vpn-certs/client.crt
+          chmod 600 $HOME/vpn-certs/client.key
+          chmod 644 $HOME/vpn-certs/client.crt
           
-          echo "client_cert_path=~/vpn-certs/client.crt" >> $GITHUB_OUTPUT
-          echo "client_key_path=~/vpn-certs/client.key" >> $GITHUB_OUTPUT
+          echo "client_cert_path=$HOME/vpn-certs/client.crt" >> $GITHUB_OUTPUT
+          echo "client_key_path=$HOME/vpn-certs/client.key" >> $GITHUB_OUTPUT
         else
           echo "No client certificate provided in secrets. You may need to configure certificate authentication."
           echo "Please ensure P2S_CLIENT_CERT and P2S_CLIENT_KEY secrets are set if using certificate authentication."
@@ -524,7 +524,7 @@ jobs:
         echo "File permissions check:"
         ls -la ~/vpn-client.ovpn
         ls -la ~/ca.crt 2>/dev/null || echo "ca.crt not found"
-        ls -la ~/vpn-certs/ 2>/dev/null || echo "vpn-certs directory not found"
+        ls -la $HOME/vpn-certs/ 2>/dev/null || echo "vpn-certs directory not found"
         
         # Test OpenVPN configuration syntax
         echo "Testing OpenVPN configuration syntax..."
@@ -818,7 +818,7 @@ jobs:
         path: |
           ~/vpn-client.ovpn
           ~/ca.crt
-          ~/vpn-certs/
+          ${{ env.HOME }}/vpn-certs/
         retention-days: 1
 
     - name: Display Connection Instructions
@@ -872,7 +872,7 @@ jobs:
         echo "Cleaning up sensitive files..."
         rm -f ~/vpn-client.ovpn
         rm -f ~/ca.crt
-        rm -rf ~/vpn-certs/
+        rm -rf $HOME/vpn-certs/
         rm -f vpn-client-config.zip
         rm -rf OpenVPN/
         rm -rf Generic/
