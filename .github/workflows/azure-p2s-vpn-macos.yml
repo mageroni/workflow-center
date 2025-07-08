@@ -90,7 +90,11 @@ jobs:
         echo "VPN Client configuration downloaded successfully"
         
         # Extract the configuration
-        unzip -q vpn-client-config.zip
+        # Use ditto as a fallback if unzip fails due to Windows paths
+        if ! unzip -q vpn-client-config.zip; then
+          echo "unzip failed, retrying with ditto..."
+          ditto -x -k vpn-client-config.zip .
+        fi
         ls -la
 
     - name: Setup Client Certificates
