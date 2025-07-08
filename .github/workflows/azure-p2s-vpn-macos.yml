@@ -219,14 +219,91 @@ jobs:
         
         # Create OpenVPN log directory
         sudo mkdir -p /var/log
+        sudo mkdir -p /var/run
+        
+        # Pre-flight checks
+        echo "Pre-flight checks before starting OpenVPN..."
+        echo "OpenVPN configuration file exists: $(test -f ~/vpn-client.ovpn && echo 'YES' || echo 'NO')"
+        echo "OpenVPN configuration file size: $(wc -c < ~/vpn-client.ovpn 2>/dev/null || echo 'ERROR')"
+        echo "OpenVPN binary location: $(which openvpn)"
+        echo "OpenVPN version: $(openvpn --version 2>&1 | head -1)"
+        echo "Current user: $(whoami)"
+        echo "Current working directory: $(pwd)"
+        
+        # Check file permissions
+        echo "File permissions check:"
+        ls -la ~/vpn-client.ovpn
+        ls -la ~/ca.crt 2>/dev/null || echo "ca.crt not found"
+        ls -la ~/vpn-certs/ 2>/dev/null || echo "vpn-certs directory not found"
+        
+        # Test OpenVPN configuration syntax
+        echo "Testing OpenVPN configuration syntax..."
+        if sudo openvpn --config ~/vpn-client.ovpn --verb 1 --test-crypto 2>&1; then
+          echo "✅ OpenVPN configuration syntax test passed"
+        else
+          echo "❌ OpenVPN configuration syntax test failed"
+          echo "Configuration file contents:"
+          cat ~/vpn-client.ovpn
+          exit 1
+        fi
+        
+        # Check network prerequisites
+        echo "Network prerequisites check:"
+        echo "Available network interfaces:"
+        ifconfig | grep -E "^[a-z]" || true
+        echo "Current routing table:"
+        netstat -rn | head -10 || true
         
         # Start OpenVPN connection in the background
         echo "Starting OpenVPN connection..."
-        sudo openvpn --config ~/vpn-client.ovpn \
+        echo "Command: sudo openvpn --config ~/vpn-client.ovpn --daemon --log /var/log/openvpn.log --writepid /var/run/openvpn.pid --verb 3"
+        
+        if sudo openvpn --config ~/vpn-client.ovpn \
           --daemon \
           --log /var/log/openvpn.log \
           --writepid /var/run/openvpn.pid \
-          --verb 3
+          --verb 3; then
+          echo "✅ OpenVPN command executed successfully"
+        else
+          EXIT_CODE=$?
+          echo "❌ OpenVPN command failed with exit code: $EXIT_CODE"
+          
+          # Immediate diagnostics
+          echo "Immediate post-failure diagnostics:"
+          echo "PID file exists: $(test -f /var/run/openvpn.pid && echo 'YES' || echo 'NO')"
+          echo "Log file exists: $(test -f /var/log/openvpn.log && echo 'YES' || echo 'NO')"
+          
+          if [ -f /var/log/openvpn.log ]; then
+            echo "OpenVPN log content:"
+            sudo cat /var/log/openvpn.log
+          fi
+          
+          # Try running OpenVPN in foreground for immediate error output
+          echo "Attempting to run OpenVPN in foreground for immediate error diagnosis..."
+          timeout 10 sudo openvpn --config ~/vpn-client.ovpn --verb 4 || echo "Foreground test completed/timed out"
+          
+          exit $EXIT_CODE
+        fi
+        
+        # Give OpenVPN a moment to start
+        sleep 3
+        
+        # Post-startup diagnostics
+        echo "Post-startup diagnostics:"
+        echo "PID file exists: $(test -f /var/run/openvpn.pid && echo 'YES' || echo 'NO')"
+        echo "Log file exists: $(test -f /var/log/openvpn.log && echo 'YES' || echo 'NO')"
+        
+        if [ -f /var/run/openvpn.pid ]; then
+          PID=$(cat /var/run/openvpn.pid)
+          echo "OpenVPN PID: $PID"
+          echo "Process running: $(kill -0 $PID 2>/dev/null && echo 'YES' || echo 'NO')"
+          echo "Process details: $(ps -p $PID 2>/dev/null || echo 'Process not found')"
+        fi
+        
+        if [ -f /var/log/openvpn.log ]; then
+          echo "Initial OpenVPN log content:"
+          sudo cat /var/log/openvpn.log
+        fi
         
         # Wait for connection to establish
         echo "Waiting for VPN connection to establish (timeout: ${{ env.VPN_CONNECTION_TIMEOUT }} seconds)..."
@@ -234,27 +311,66 @@ jobs:
         max_timeout=${{ env.VPN_CONNECTION_TIMEOUT }}
         
         while [ $timeout_counter -lt $max_timeout ]; do
+          echo "Connection attempt $((timeout_counter/2 + 1)) - checking status..."
+          
           # Check if OpenVPN process is running
-          if [ -f /var/run/openvpn.pid ] && kill -0 $(cat /var/run/openvpn.pid) 2>/dev/null; then
-            # Check if tun interface is up
-            if ifconfig | grep -q "utun"; then
-              echo "VPN connection established successfully!"
-              echo "vpn_connected=true" >> $GITHUB_OUTPUT
+          if [ -f /var/run/openvpn.pid ]; then
+            PID=$(cat /var/run/openvpn.pid)
+            if kill -0 $PID 2>/dev/null; then
+              echo "✅ OpenVPN process is running (PID: $PID)"
               
-              # Display network information
-              echo "Network interfaces:"
-              ifconfig | grep -A 5 "utun"
-              
-              echo "Routing table:"
-              netstat -rn | head -20
-              
-              # Get VPN IP address
-              VPN_IP=$(ifconfig | grep -A 1 "utun" | grep "inet " | awk '{print $2}' | head -1)
-              echo "VPN IP Address: $VPN_IP"
-              echo "vpn_ip=$VPN_IP" >> $GITHUB_OUTPUT
-              
+              # Check if tun interface is up
+              TUN_INTERFACES=$(ifconfig | grep "utun" | cut -d: -f1 || true)
+              if [ -n "$TUN_INTERFACES" ]; then
+                echo "✅ TUN interface(s) found: $TUN_INTERFACES"
+                
+                # Check for VPN IP assignment
+                VPN_IP=$(ifconfig | grep -A 1 "utun" | grep "inet " | awk '{print $2}' | head -1 || true)
+                if [ -n "$VPN_IP" ]; then
+                  echo "✅ VPN IP assigned: $VPN_IP"
+                  echo "VPN connection established successfully!"
+                  echo "vpn_connected=true" >> $GITHUB_OUTPUT
+                  
+                  # Display network information
+                  echo "Network interfaces:"
+                  ifconfig | grep -A 5 "utun"
+                  
+                  echo "Routing table:"
+                  netstat -rn | head -20
+                  
+                  echo "vpn_ip=$VPN_IP" >> $GITHUB_OUTPUT
+                  break
+                else
+                  echo "⏳ TUN interface exists but no IP assigned yet..."
+                fi
+              else
+                echo "⏳ No TUN interface found yet..."
+                ifconfig | grep -E "^[a-z]" | head -5
+              fi
+            else
+              echo "❌ OpenVPN PID file exists but process is not running"
+              # Check why the process died
+              if [ -f /var/log/openvpn.log ]; then
+                echo "Recent OpenVPN log entries:"
+                sudo tail -10 /var/log/openvpn.log
+              fi
               break
             fi
+          else
+            echo "❌ OpenVPN PID file not found"
+            # Check if process is running without PID file
+            OPENVPN_PROCESSES=$(ps aux | grep -v grep | grep openvpn || true)
+            if [ -n "$OPENVPN_PROCESSES" ]; then
+              echo "Found OpenVPN processes without PID file:"
+              echo "$OPENVPN_PROCESSES"
+            fi
+            break
+          fi
+          
+          # Show current log tail for debugging
+          if [ -f /var/log/openvpn.log ] && [ $((timeout_counter % 10)) -eq 0 ]; then
+            echo "Recent log entries (every 10 seconds):"
+            sudo tail -5 /var/log/openvpn.log
           fi
           
           sleep 2
@@ -263,9 +379,36 @@ jobs:
         done
         
         if [ $timeout_counter -ge $max_timeout ]; then
-          echo "VPN connection failed to establish within timeout period"
-          echo "OpenVPN log:"
+          echo "❌ VPN connection failed to establish within timeout period"
+          echo "Final diagnostics:"
+          
+          # Final process check
+          if [ -f /var/run/openvpn.pid ]; then
+            PID=$(cat /var/run/openvpn.pid)
+            echo "PID file contents: $PID"
+            echo "Process status: $(kill -0 $PID 2>/dev/null && echo 'RUNNING' || echo 'NOT RUNNING')"
+            if kill -0 $PID 2>/dev/null; then
+              echo "Process details: $(ps -p $PID)"
+            fi
+          fi
+          
+          # Network interface check
+          echo "Current network interfaces:"
+          ifconfig | grep -E "^[a-z]"
+          
+          # Full log dump
+          echo "Complete OpenVPN log:"
           sudo cat /var/log/openvpn.log 2>/dev/null || echo "No log file found"
+          
+          # System diagnostics
+          echo "System diagnostics:"
+          echo "Available TUN/TAP devices:"
+          ls -la /dev/tun* 2>/dev/null || echo "No TUN devices found"
+          ls -la /dev/tap* 2>/dev/null || echo "No TAP devices found"
+          
+          echo "Kernel modules:"
+          kextstat | grep -i tun || echo "No TUN kernel extensions loaded"
+          
           echo "vpn_connected=false" >> $GITHUB_OUTPUT
           exit 1
         fi
