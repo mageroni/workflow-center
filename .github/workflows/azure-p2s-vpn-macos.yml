@@ -29,6 +29,11 @@ on:
         description: 'Private App Service URL to test connectivity (e.g., https://myapp.azurewebsites.net)'
         required: false
         type: string
+      vpn_connection_timeout:
+        description: 'VPN connection timeout in seconds'
+        required: false
+        type: number
+        default: 30
 
 env:
   AZURE_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
@@ -36,6 +41,7 @@ env:
   VPN_GATEWAY_NAME: ${{ inputs.vpn_gateway_name }}
   CLIENT_CERT_NAME: ${{ inputs.client_certificate_name }}
   PRIVATE_APP_SERVICE_URL: ${{ inputs.private_app_service_url }}
+  VPN_CONNECTION_TIMEOUT: ${{ inputs.vpn_connection_timeout }}
 
 jobs:
   setup-p2s-vpn:
@@ -131,15 +137,24 @@ jobs:
       run: |
         echo "Configuring OpenVPN client..."
         
-        # Find the OpenVPN configuration file in the extracted package
-        if [ -f "OpenVPN/VpnSettings.xml" ]; then
+        # Use the existing vpnconfig.ovpn file from the downloaded package
+        if [ -f "OpenVPN/vpnconfig.ovpn" ]; then
+          echo "Found existing vpnconfig.ovpn, using it as base configuration..."
+          cp "OpenVPN/vpnconfig.ovpn" ~/vpn-client.ovpn
+          
+          # Copy CA certificate if available
+          if [ -f "OpenVPN/ca.crt" ]; then
+            cp OpenVPN/ca.crt ~/ca.crt
+          fi
+          
+        elif [ -f "OpenVPN/VpnSettings.xml" ]; then
           echo "Found VpnSettings.xml, extracting configuration..."
           
           # Extract server information from VpnSettings.xml
           SERVER=$(grep -o '<VpnServer>[^<]*</VpnServer>' OpenVPN/VpnSettings.xml | sed 's/<[^>]*>//g')
           echo "VPN Server: $SERVER"
           
-          # Create OpenVPN configuration file
+          # Create OpenVPN configuration file as fallback
           cat > ~/vpn-client.ovpn << EOF
         client
         dev tun
@@ -169,17 +184,27 @@ jobs:
           echo "Warning: No recognized VPN configuration found in the package"
           ls -la OpenVPN/ 2>/dev/null || echo "No OpenVPN directory"
           ls -la Generic/ 2>/dev/null || echo "No Generic directory"
+          exit 1
         fi
         
-        # If client certificates are available, add them to the config
+        # If client certificates are available, modify the config for certificate authentication
         if [ -n "${{ steps.client-certs.outputs.client_cert_path }}" ]; then
-          echo "cert ${{ steps.client-certs.outputs.client_cert_path }}" >> ~/vpn-client.ovpn
-          echo "key ${{ steps.client-certs.outputs.client_key_path }}" >> ~/vpn-client.ovpn
+          echo "Configuring certificate authentication..."
+          
           # Remove auth-user-pass since we're using certificate authentication
           sed -i '' '/auth-user-pass/d' ~/vpn-client.ovpn
+          
+          # Add client certificate and key paths if not already present
+          if ! grep -q "^cert " ~/vpn-client.ovpn; then
+            echo "cert ${{ steps.client-certs.outputs.client_cert_path }}" >> ~/vpn-client.ovpn
+          fi
+          
+          if ! grep -q "^key " ~/vpn-client.ovpn; then
+            echo "key ${{ steps.client-certs.outputs.client_key_path }}" >> ~/vpn-client.ovpn
+          fi
         fi
         
-        echo "OpenVPN configuration file created:"
+        echo "Final OpenVPN configuration file:"
         cat ~/vpn-client.ovpn
 
     - name: Establish VPN Connection
@@ -204,9 +229,9 @@ jobs:
           --verb 3
         
         # Wait for connection to establish
-        echo "Waiting for VPN connection to establish (timeout: 30 seconds)..."
+        echo "Waiting for VPN connection to establish (timeout: ${{ env.VPN_CONNECTION_TIMEOUT }} seconds)..."
         timeout_counter=0
-        max_timeout=30
+        max_timeout=${{ env.VPN_CONNECTION_TIMEOUT }}
         
         while [ $timeout_counter -lt $max_timeout ]; do
           # Check if OpenVPN process is running
