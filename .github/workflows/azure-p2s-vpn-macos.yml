@@ -342,7 +342,68 @@ jobs:
         echo "Configuration file created, size: $(wc -c < ~/vpn-client.ovpn) bytes"
         echo "Configuration file line count: $(wc -l < ~/vpn-client.ovpn) lines"
         
-        # Comprehensive configuration validation
+        # If client certificates are available, modify the config for certificate authentication
+        if [ -n "${{ steps.client-certs.outputs.client_cert_path }}" ]; then
+          echo "Configuring certificate authentication..."
+          
+          if [ "$AZURE_STYLE_CONFIG" = "true" ]; then
+            echo "Updating Azure-style configuration with embedded certificates..."
+            
+            # Read the certificate and key content
+            CLIENT_CERT_CONTENT=$(cat "${{ steps.client-certs.outputs.client_cert_path }}")
+            CLIENT_KEY_CONTENT=$(cat "${{ steps.client-certs.outputs.client_key_path }}")
+            
+            # Replace the placeholders with actual certificate content
+            # Use a temporary file to handle multi-line replacements safely
+            python3 -c "
+            import sys
+            import re
+            
+            # Read the config file
+            with open(sys.argv[1], 'r') as f:
+                content = f.read()
+            
+            # Read certificate and key
+            with open(sys.argv[2], 'r') as f:
+                cert_content = f.read().strip()
+            with open(sys.argv[3], 'r') as f:
+                key_content = f.read().strip()
+            
+            # Replace placeholders
+            content = content.replace('\$CLIENTCERTIFICATE', cert_content)
+            content = content.replace('\$PRIVATEKEY', key_content)
+            
+            # Write back
+            with open(sys.argv[1], 'w') as f:
+                f.write(content)
+            " ~/vpn-client.ovpn "${{ steps.client-certs.outputs.client_cert_path }}" "${{ steps.client-certs.outputs.client_key_path }}"
+            
+            echo "Certificate placeholders replaced with actual certificates"
+            
+          else
+            echo "Updating standard OpenVPN configuration..."
+            
+            # Remove auth-user-pass since we're using certificate authentication
+            sed -i '' '/auth-user-pass/d' ~/vpn-client.ovpn
+            
+            # Add client certificate and key paths if not already present
+            if ! grep -q "^cert " ~/vpn-client.ovpn; then
+              echo "cert ${{ steps.client-certs.outputs.client_cert_path }}" >> ~/vpn-client.ovpn
+            fi
+            
+            if ! grep -q "^key " ~/vpn-client.ovpn; then
+              echo "key ${{ steps.client-certs.outputs.client_key_path }}" >> ~/vpn-client.ovpn
+            fi
+          fi
+        else
+          echo "⚠️ No client certificates provided - the configuration may not work without proper authentication"
+          if [ "$AZURE_STYLE_CONFIG" = "true" ]; then
+            echo "❌ Azure-style configuration requires client certificates to replace \$CLIENTCERTIFICATE and \$PRIVATEKEY placeholders"
+            exit 1
+          fi
+        fi
+        
+        # Comprehensive configuration validation (after certificate replacement)
         echo "=== Validating OpenVPN configuration ==="
         
         # Check for required directives
@@ -430,66 +491,6 @@ jobs:
           exit 1
         else
           echo "✅ Configuration validation passed"
-        fi
-        
-        # If client certificates are available, modify the config for certificate authentication
-        if [ -n "${{ steps.client-certs.outputs.client_cert_path }}" ]; then
-          echo "Configuring certificate authentication..."
-          
-          if [ "$AZURE_STYLE_CONFIG" = "true" ]; then
-            echo "Updating Azure-style configuration with embedded certificates..."
-            
-            # Read the certificate and key content
-            CLIENT_CERT_CONTENT=$(cat "${{ steps.client-certs.outputs.client_cert_path }}")
-            CLIENT_KEY_CONTENT=$(cat "${{ steps.client-certs.outputs.client_key_path }}")
-            
-            # Replace the placeholders with actual certificate content
-            # Use a temporary file to handle multi-line replacements safely
-            python3 -c "
-            import sys
-            import re
-            
-            # Read the config file
-            with open(sys.argv[1], 'r') as f:
-                content = f.read()
-            
-            # Read certificate and key
-            with open(sys.argv[2], 'r') as f:
-                cert_content = f.read().strip()
-            with open(sys.argv[3], 'r') as f:
-                key_content = f.read().strip()
-            
-            # Replace placeholders
-            content = content.replace('\$CLIENTCERTIFICATE', cert_content)
-            content = content.replace('\$PRIVATEKEY', key_content)
-            
-            # Write back
-            with open(sys.argv[1], 'w') as f:
-                f.write(content)
-            " ~/vpn-client.ovpn "${{ steps.client-certs.outputs.client_cert_path }}" "${{ steps.client-certs.outputs.client_key_path }}"
-            
-            echo "Certificate placeholders replaced with actual certificates"
-            
-          else
-            echo "Updating standard OpenVPN configuration..."
-            
-            # Remove auth-user-pass since we're using certificate authentication
-            sed -i '' '/auth-user-pass/d' ~/vpn-client.ovpn
-            
-            # Add client certificate and key paths if not already present
-            if ! grep -q "^cert " ~/vpn-client.ovpn; then
-              echo "cert ${{ steps.client-certs.outputs.client_cert_path }}" >> ~/vpn-client.ovpn
-            fi
-            
-            if ! grep -q "^key " ~/vpn-client.ovpn; then
-              echo "key ${{ steps.client-certs.outputs.client_key_path }}" >> ~/vpn-client.ovpn
-            fi
-          fi
-        else
-          echo "⚠️ No client certificates provided - the configuration may not work without proper authentication"
-          if [ "$AZURE_STYLE_CONFIG" = "true" ]; then
-            echo "❌ Azure-style configuration requires client certificates to replace \$CLIENTCERTIFICATE and \$PRIVATEKEY placeholders"
-          fi
         fi
         
         echo "Final OpenVPN configuration file:"
