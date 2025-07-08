@@ -446,27 +446,27 @@ jobs:
             # Replace the placeholders with actual certificate content
             # Use a temporary file to handle multi-line replacements safely
             python3 -c "
-import sys
-import re
-
-# Read the config file
-with open(sys.argv[1], 'r') as f:
-    content = f.read()
-
-# Read certificate and key
-with open(sys.argv[2], 'r') as f:
-    cert_content = f.read().strip()
-with open(sys.argv[3], 'r') as f:
-    key_content = f.read().strip()
-
-# Replace placeholders
-content = content.replace('\$CLIENTCERTIFICATE', cert_content)
-content = content.replace('\$PRIVATEKEY', key_content)
-
-# Write back
-with open(sys.argv[1], 'w') as f:
-    f.write(content)
-" ~/vpn-client.ovpn "${{ steps.client-certs.outputs.client_cert_path }}" "${{ steps.client-certs.outputs.client_key_path }}"
+            import sys
+            import re
+            
+            # Read the config file
+            with open(sys.argv[1], 'r') as f:
+                content = f.read()
+            
+            # Read certificate and key
+            with open(sys.argv[2], 'r') as f:
+                cert_content = f.read().strip()
+            with open(sys.argv[3], 'r') as f:
+                key_content = f.read().strip()
+            
+            # Replace placeholders
+            content = content.replace('\$CLIENTCERTIFICATE', cert_content)
+            content = content.replace('\$PRIVATEKEY', key_content)
+            
+            # Write back
+            with open(sys.argv[1], 'w') as f:
+                f.write(content)
+            " ~/vpn-client.ovpn "${{ steps.client-certs.outputs.client_cert_path }}" "${{ steps.client-certs.outputs.client_key_path }}"
             
             echo "Certificate placeholders replaced with actual certificates"
             
