@@ -17,5 +17,6 @@ jobs:
 
     - name: Check Runner Public IP
       run: |
-        echo "Checking public IP address of the runner..."
-        curl ifconfig.me
+        brew update
+        brew install --cask tuntap
+        sudo kextload /Library/Extensions/tun.kext  
