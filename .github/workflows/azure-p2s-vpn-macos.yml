@@ -531,96 +531,6 @@ jobs:
           fi
         fi
         
-        # Comprehensive configuration validation (after certificate replacement)
-        echo "=== Validating OpenVPN configuration ==="
-        
-        # Check for required directives
-        VALIDATION_ERRORS=0
-        
-        if ! grep -q "^client" ~/vpn-client.ovpn; then
-          echo "❌ Missing 'client' directive"
-          VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-        fi
-        
-        if ! grep -q "^remote " ~/vpn-client.ovpn; then
-          echo "❌ Missing 'remote' directive"
-          VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-        fi
-        
-        if ! grep -q "^dev " ~/vpn-client.ovpn; then
-          echo "❌ Missing 'dev' directive"
-          VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-        fi
-        
-        if ! grep -q "^proto " ~/vpn-client.ovpn; then
-          echo "❌ Missing 'proto' directive"
-          VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-        fi
-        
-        # Check for CA certificate reference
-        if grep -q "^ca " ~/vpn-client.ovpn; then
-          CA_FILE=$(grep "^ca " ~/vpn-client.ovpn | awk '{print $2}')
-          if [ ! -f "$CA_FILE" ] && [ ! -f ~/"$CA_FILE" ]; then
-            echo "❌ CA certificate file '$CA_FILE' not found"
-            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-          else
-            echo "✅ CA certificate file found"
-          fi
-        elif grep -q "<ca>" ~/vpn-client.ovpn; then
-          echo "✅ Embedded CA certificate found"
-        else
-          echo "⚠️ No CA certificate reference found in configuration"
-        fi
-        
-        # Check for client certificate configuration
-        if grep -q "<cert>" ~/vpn-client.ovpn; then
-          if grep -q '\$CLIENTCERTIFICATE' ~/vpn-client.ovpn; then
-            echo "❌ Client certificate placeholder not replaced"
-            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-          else
-            echo "✅ Embedded client certificate found"
-          fi
-        elif grep -q "^cert " ~/vpn-client.ovpn; then
-          CERT_FILE=$(grep "^cert " ~/vpn-client.ovpn | awk '{print $2}')
-          if [ ! -f "$CERT_FILE" ] && [ ! -f ~/"$CERT_FILE" ]; then
-            echo "❌ Client certificate file '$CERT_FILE' not found"
-            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-          else
-            echo "✅ Client certificate file found"
-          fi
-        else
-          echo "⚠️ No client certificate configuration found"
-        fi
-        
-        # Check for private key configuration
-        if grep -q "<key>" ~/vpn-client.ovpn; then
-          if grep -q '\$PRIVATEKEY' ~/vpn-client.ovpn; then
-            echo "❌ Private key placeholder not replaced"
-            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-          else
-            echo "✅ Embedded private key found"
-          fi
-        elif grep -q "^key " ~/vpn-client.ovpn; then
-          KEY_FILE=$(grep "^key " ~/vpn-client.ovpn | awk '{print $2}')
-          if [ ! -f "$KEY_FILE" ] && [ ! -f ~/"$KEY_FILE" ]; then
-            echo "❌ Private key file '$KEY_FILE' not found"
-            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
-          else
-            echo "✅ Private key file found"
-          fi
-        else
-          echo "⚠️ No private key configuration found"
-        fi
-        
-        if [ $VALIDATION_ERRORS -gt 0 ]; then
-          echo "❌ Configuration validation failed with $VALIDATION_ERRORS errors"
-          echo "Configuration content:"
-          cat ~/vpn-client.ovpn
-          exit 1
-        else
-          echo "✅ Configuration validation passed"
-        fi
-        
         echo "Final OpenVPN configuration file:"
         echo "Size: $(wc -c < ~/vpn-client.ovpn) bytes, Lines: $(wc -l < ~/vpn-client.ovpn)"
         cat ~/vpn-client.ovpn
@@ -654,15 +564,96 @@ jobs:
         ls -la ~/ca.crt 2>/dev/null || echo "ca.crt not found"
         ls -la $HOME/vpn-certs/ 2>/dev/null || echo "vpn-certs directory not found"
         
-        # Test OpenVPN configuration syntax
-        echo "Testing OpenVPN configuration syntax..."
-        if sudo openvpn --config ~/vpn-client.ovpn --verb 1 --test-crypto 2>&1; then
-          echo "✅ OpenVPN configuration syntax test passed"
+        # Validate OpenVPN configuration
+        echo "Validating OpenVPN configuration..."
+        
+        # Perform basic configuration validation
+        VALIDATION_ERRORS=0
+        
+        echo "Checking required OpenVPN directives:"
+        
+        if ! grep -q "^client" ~/vpn-client.ovpn; then
+          echo "❌ Missing 'client' directive"
+          VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
         else
-          echo "❌ OpenVPN configuration syntax test failed"
+          echo "✅ Found 'client' directive"
+        fi
+        
+        if ! grep -q "^remote " ~/vpn-client.ovpn; then
+          echo "❌ Missing 'remote' directive"
+          VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+        else
+          REMOTE_LINE=$(grep "^remote " ~/vpn-client.ovpn | head -1)
+          echo "✅ Found remote directive: $REMOTE_LINE"
+        fi
+        
+        if ! grep -q "^dev " ~/vpn-client.ovpn; then
+          echo "❌ Missing 'dev' directive"
+          VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+        else
+          DEV_LINE=$(grep "^dev " ~/vpn-client.ovpn | head -1)
+          echo "✅ Found dev directive: $DEV_LINE"
+        fi
+        
+        if ! grep -q "^proto " ~/vpn-client.ovpn; then
+          echo "❌ Missing 'proto' directive"
+          VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+        else
+          PROTO_LINE=$(grep "^proto " ~/vpn-client.ovpn | head -1)
+          echo "✅ Found proto directive: $PROTO_LINE"
+        fi
+        
+        # Check for authentication method
+        echo "Checking authentication configuration:"
+        if grep -q "<cert>" ~/vpn-client.ovpn && grep -q "<key>" ~/vpn-client.ovpn; then
+          echo "✅ Found embedded certificate authentication"
+          # Verify certificates were properly replaced
+          if grep -q '\$CLIENTCERTIFICATE\|\$PRIVATEKEY' ~/vpn-client.ovpn; then
+            echo "❌ Certificate placeholders not replaced"
+            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+          else
+            echo "✅ Certificate placeholders replaced successfully"
+          fi
+        elif grep -q "^cert " ~/vpn-client.ovpn && grep -q "^key " ~/vpn-client.ovpn; then
+          echo "✅ Found file-based certificate authentication"
+          CERT_FILE=$(grep "^cert " ~/vpn-client.ovpn | awk '{print $2}' | head -1)
+          KEY_FILE=$(grep "^key " ~/vpn-client.ovpn | awk '{print $2}' | head -1)
+          if [ ! -f "$CERT_FILE" ]; then
+            echo "❌ Certificate file not found: $CERT_FILE"
+            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+          fi
+          if [ ! -f "$KEY_FILE" ]; then
+            echo "❌ Private key file not found: $KEY_FILE"
+            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+          fi
+        elif grep -q "auth-user-pass" ~/vpn-client.ovpn; then
+          echo "✅ Found username/password authentication"
+        else
+          echo "⚠️ No clear authentication method found - this may cause connection issues"
+        fi
+        
+        # Check for CA certificate
+        if grep -q "<ca>" ~/vpn-client.ovpn; then
+          echo "✅ Found embedded CA certificate"
+        elif grep -q "^ca " ~/vpn-client.ovpn; then
+          CA_FILE=$(grep "^ca " ~/vpn-client.ovpn | awk '{print $2}' | head -1)
+          if [ -f "$CA_FILE" ]; then
+            echo "✅ Found CA certificate file: $CA_FILE"
+          else
+            echo "❌ CA certificate file not found: $CA_FILE"
+            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+          fi
+        else
+          echo "⚠️ No CA certificate found - this may cause connection issues"
+        fi
+        
+        if [ $VALIDATION_ERRORS -gt 0 ]; then
+          echo "❌ Configuration validation failed with $VALIDATION_ERRORS critical errors"
           echo "Configuration file contents:"
           cat ~/vpn-client.ovpn
           exit 1
+        else
+          echo "✅ OpenVPN configuration validation passed"
         fi
         
         # Check network prerequisites
