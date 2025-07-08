@@ -208,12 +208,21 @@ jobs:
             cp "OpenVPN/vpnconfig.ovpn" ~/vpn-client.ovpn
             USE_XML_FALLBACK=false
             
-            # Copy CA certificate if available
-            if [ -f "OpenVPN/ca.crt" ]; then
-              echo "Copying CA certificate..."
-              cp OpenVPN/ca.crt ~/ca.crt
+            # Check if this is an Azure-style config with embedded certificates and placeholders
+            if grep -q '<cert>' ~/vpn-client.ovpn && grep -q '\$CLIENTCERTIFICATE' ~/vpn-client.ovpn; then
+              echo "Detected Azure-style configuration with embedded certificate placeholders"
+              AZURE_STYLE_CONFIG=true
             else
-              echo "⚠️ CA certificate not found in OpenVPN directory"
+              echo "Standard OpenVPN configuration detected"
+              AZURE_STYLE_CONFIG=false
+              
+              # Copy CA certificate if available for standard configs
+              if [ -f "OpenVPN/ca.crt" ]; then
+                echo "Copying CA certificate..."
+                cp OpenVPN/ca.crt ~/ca.crt
+              else
+                echo "⚠️ CA certificate not found in OpenVPN directory"
+              fi
             fi
           fi
           
@@ -368,8 +377,50 @@ jobs:
           else
             echo "✅ CA certificate file found"
           fi
+        elif grep -q "<ca>" ~/vpn-client.ovpn; then
+          echo "✅ Embedded CA certificate found"
         else
           echo "⚠️ No CA certificate reference found in configuration"
+        fi
+        
+        # Check for client certificate configuration
+        if grep -q "<cert>" ~/vpn-client.ovpn; then
+          if grep -q '\$CLIENTCERTIFICATE' ~/vpn-client.ovpn; then
+            echo "❌ Client certificate placeholder not replaced"
+            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+          else
+            echo "✅ Embedded client certificate found"
+          fi
+        elif grep -q "^cert " ~/vpn-client.ovpn; then
+          CERT_FILE=$(grep "^cert " ~/vpn-client.ovpn | awk '{print $2}')
+          if [ ! -f "$CERT_FILE" ] && [ ! -f ~/"$CERT_FILE" ]; then
+            echo "❌ Client certificate file '$CERT_FILE' not found"
+            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+          else
+            echo "✅ Client certificate file found"
+          fi
+        else
+          echo "⚠️ No client certificate configuration found"
+        fi
+        
+        # Check for private key configuration
+        if grep -q "<key>" ~/vpn-client.ovpn; then
+          if grep -q '\$PRIVATEKEY' ~/vpn-client.ovpn; then
+            echo "❌ Private key placeholder not replaced"
+            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+          else
+            echo "✅ Embedded private key found"
+          fi
+        elif grep -q "^key " ~/vpn-client.ovpn; then
+          KEY_FILE=$(grep "^key " ~/vpn-client.ovpn | awk '{print $2}')
+          if [ ! -f "$KEY_FILE" ] && [ ! -f ~/"$KEY_FILE" ]; then
+            echo "❌ Private key file '$KEY_FILE' not found"
+            VALIDATION_ERRORS=$((VALIDATION_ERRORS + 1))
+          else
+            echo "✅ Private key file found"
+          fi
+        else
+          echo "⚠️ No private key configuration found"
         fi
         
         if [ $VALIDATION_ERRORS -gt 0 ]; then
@@ -385,16 +436,59 @@ jobs:
         if [ -n "${{ steps.client-certs.outputs.client_cert_path }}" ]; then
           echo "Configuring certificate authentication..."
           
-          # Remove auth-user-pass since we're using certificate authentication
-          sed -i '' '/auth-user-pass/d' ~/vpn-client.ovpn
-          
-          # Add client certificate and key paths if not already present
-          if ! grep -q "^cert " ~/vpn-client.ovpn; then
-            echo "cert ${{ steps.client-certs.outputs.client_cert_path }}" >> ~/vpn-client.ovpn
+          if [ "$AZURE_STYLE_CONFIG" = "true" ]; then
+            echo "Updating Azure-style configuration with embedded certificates..."
+            
+            # Read the certificate and key content
+            CLIENT_CERT_CONTENT=$(cat "${{ steps.client-certs.outputs.client_cert_path }}")
+            CLIENT_KEY_CONTENT=$(cat "${{ steps.client-certs.outputs.client_key_path }}")
+            
+            # Replace the placeholders with actual certificate content
+            # Use a temporary file to handle multi-line replacements safely
+            python3 -c "
+import sys
+import re
+
+# Read the config file
+with open(sys.argv[1], 'r') as f:
+    content = f.read()
+
+# Read certificate and key
+with open(sys.argv[2], 'r') as f:
+    cert_content = f.read().strip()
+with open(sys.argv[3], 'r') as f:
+    key_content = f.read().strip()
+
+# Replace placeholders
+content = content.replace('\$CLIENTCERTIFICATE', cert_content)
+content = content.replace('\$PRIVATEKEY', key_content)
+
+# Write back
+with open(sys.argv[1], 'w') as f:
+    f.write(content)
+" ~/vpn-client.ovpn "${{ steps.client-certs.outputs.client_cert_path }}" "${{ steps.client-certs.outputs.client_key_path }}"
+            
+            echo "Certificate placeholders replaced with actual certificates"
+            
+          else
+            echo "Updating standard OpenVPN configuration..."
+            
+            # Remove auth-user-pass since we're using certificate authentication
+            sed -i '' '/auth-user-pass/d' ~/vpn-client.ovpn
+            
+            # Add client certificate and key paths if not already present
+            if ! grep -q "^cert " ~/vpn-client.ovpn; then
+              echo "cert ${{ steps.client-certs.outputs.client_cert_path }}" >> ~/vpn-client.ovpn
+            fi
+            
+            if ! grep -q "^key " ~/vpn-client.ovpn; then
+              echo "key ${{ steps.client-certs.outputs.client_key_path }}" >> ~/vpn-client.ovpn
+            fi
           fi
-          
-          if ! grep -q "^key " ~/vpn-client.ovpn; then
-            echo "key ${{ steps.client-certs.outputs.client_key_path }}" >> ~/vpn-client.ovpn
+        else
+          echo "⚠️ No client certificates provided - the configuration may not work without proper authentication"
+          if [ "$AZURE_STYLE_CONFIG" = "true" ]; then
+            echo "❌ Azure-style configuration requires client certificates to replace \$CLIENTCERTIFICATE and \$PRIVATEKEY placeholders"
           fi
         fi
         
