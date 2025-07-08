@@ -138,6 +138,155 @@ jobs:
           echo "⚠️ Seems like very few files were extracted, checking for extraction issues..."
         fi
 
+    - name: Setup Certificate Replacement Script
+      run: |
+        echo "Creating certificate placeholder replacement script..."
+        cat << 'EOF' > replace_cert_placeholders.py
+        #!/usr/bin/env python3
+        """
+        Azure OpenVPN Certificate Placeholder Replacement Script
+
+        This script replaces the $CLIENTCERTIFICATE and $PRIVATEKEY placeholders
+        in Azure-generated OpenVPN configuration files with actual certificate content.
+
+        Usage:
+            python3 replace_cert_placeholders.py <config_file> <cert_file> <key_file>
+
+        Arguments:
+            config_file: Path to the OpenVPN configuration file with placeholders
+            cert_file: Path to the client certificate file
+            key_file: Path to the client private key file
+        """
+
+        import sys
+        import os
+
+
+        def replace_placeholders(config_path, cert_path, key_path):
+            """
+            Replace certificate placeholders in OpenVPN config with actual content.
+            
+            Args:
+                config_path (str): Path to the OpenVPN configuration file
+                cert_path (str): Path to the client certificate file
+                key_path (str): Path to the client private key file
+            
+            Returns:
+                bool: True if successful, False otherwise
+            """
+            try:
+                # Validate input files exist
+                if not os.path.exists(config_path):
+                    print(f"Error: Config file not found: {config_path}")
+                    return False
+                
+                if not os.path.exists(cert_path):
+                    print(f"Error: Certificate file not found: {cert_path}")
+                    return False
+                
+                if not os.path.exists(key_path):
+                    print(f"Error: Private key file not found: {key_path}")
+                    return False
+                
+                # Read the config file
+                print(f"Reading configuration file: {config_path}")
+                with open(config_path, 'r') as f:
+                    content = f.read()
+                
+                # Check if placeholders exist
+                has_cert_placeholder = '$CLIENTCERTIFICATE' in content
+                has_key_placeholder = '$PRIVATEKEY' in content
+                
+                if not has_cert_placeholder and not has_key_placeholder:
+                    print("No certificate placeholders found in config file")
+                    return True
+                
+                print(f"Found placeholders - Certificate: {has_cert_placeholder}, Key: {has_key_placeholder}")
+                
+                # Read certificate content
+                print(f"Reading certificate file: {cert_path}")
+                with open(cert_path, 'r') as f:
+                    cert_content = f.read().strip()
+                
+                # Read private key content
+                print(f"Reading private key file: {key_path}")
+                with open(key_path, 'r') as f:
+                    key_content = f.read().strip()
+                
+                # Validate certificate content
+                if not cert_content.startswith('-----BEGIN CERTIFICATE-----'):
+                    print("Warning: Certificate file may not be in PEM format")
+                
+                if not key_content.startswith('-----BEGIN PRIVATE KEY-----') and not key_content.startswith('-----BEGIN RSA PRIVATE KEY-----'):
+                    print("Warning: Private key file may not be in PEM format")
+                
+                # Replace placeholders
+                original_content = content
+                if has_cert_placeholder:
+                    content = content.replace('$CLIENTCERTIFICATE', cert_content)
+                    print("Replaced $CLIENTCERTIFICATE placeholder")
+                
+                if has_key_placeholder:
+                    content = content.replace('$PRIVATEKEY', key_content)
+                    print("Replaced $PRIVATEKEY placeholder")
+                
+                # Verify replacements were made
+                if content == original_content:
+                    print("Warning: No replacements were made")
+                    return False
+                
+                # Write back to config file
+                print(f"Writing updated configuration to: {config_path}")
+                with open(config_path, 'w') as f:
+                    f.write(content)
+                
+                print("Certificate placeholders successfully replaced")
+                return True
+                
+            except Exception as e:
+                print(f"Error replacing certificate placeholders: {e}")
+                return False
+
+
+        def main():
+            """Main function to handle command line arguments and execute replacement."""
+            if len(sys.argv) != 4:
+                print("Usage: python3 replace_cert_placeholders.py <config_file> <cert_file> <key_file>")
+                print()
+                print("Arguments:")
+                print("  config_file: Path to the OpenVPN configuration file with placeholders")
+                print("  cert_file: Path to the client certificate file")
+                print("  key_file: Path to the client private key file")
+                sys.exit(1)
+            
+            config_file = sys.argv[1]
+            cert_file = sys.argv[2]
+            key_file = sys.argv[3]
+            
+            print("Azure OpenVPN Certificate Placeholder Replacement")
+            print("=" * 50)
+            print(f"Config file: {config_file}")
+            print(f"Certificate file: {cert_file}")
+            print(f"Private key file: {key_file}")
+            print()
+            
+            success = replace_placeholders(config_file, cert_file, key_file)
+            
+            if success:
+                print("\n✅ Placeholder replacement completed successfully")
+                sys.exit(0)
+            else:
+                print("\n❌ Placeholder replacement failed")
+                sys.exit(1)
+
+
+        if __name__ == "__main__":
+            main()
+        EOF
+        
+        chmod +x replace_cert_placeholders.py
+        echo "Certificate replacement script created and made executable"
+
     - name: Setup Client Certificates
       id: client-certs
       run: |
@@ -349,36 +498,15 @@ jobs:
           if [ "$AZURE_STYLE_CONFIG" = "true" ]; then
             echo "Updating Azure-style configuration with embedded certificates..."
             
-            # Read the certificate and key content
-            CLIENT_CERT_CONTENT=$(cat "${{ steps.client-certs.outputs.client_cert_path }}")
-            CLIENT_KEY_CONTENT=$(cat "${{ steps.client-certs.outputs.client_key_path }}")
+            # Use the external Python script to replace certificate placeholders
+            python3 replace_cert_placeholders.py ~/vpn-client.ovpn "${{ steps.client-certs.outputs.client_cert_path }}" "${{ steps.client-certs.outputs.client_key_path }}"
             
-            # Replace the placeholders with actual certificate content
-            # Use a temporary file to handle multi-line replacements safely
-            python3 -c "
-            import sys
-            import re
-            
-            # Read the config file
-            with open(sys.argv[1], 'r') as f:
-                content = f.read()
-            
-            # Read certificate and key
-            with open(sys.argv[2], 'r') as f:
-                cert_content = f.read().strip()
-            with open(sys.argv[3], 'r') as f:
-                key_content = f.read().strip()
-            
-            # Replace placeholders
-            content = content.replace('\$CLIENTCERTIFICATE', cert_content)
-            content = content.replace('\$PRIVATEKEY', key_content)
-            
-            # Write back
-            with open(sys.argv[1], 'w') as f:
-                f.write(content)
-            " ~/vpn-client.ovpn "${{ steps.client-certs.outputs.client_cert_path }}" "${{ steps.client-certs.outputs.client_key_path }}"
-            
-            echo "Certificate placeholders replaced with actual certificates"
+            if [ $? -eq 0 ]; then
+              echo "✅ Certificate placeholders replaced successfully"
+            else
+              echo "❌ Failed to replace certificate placeholders"
+              exit 1
+            fi
             
           else
             echo "Updating standard OpenVPN configuration..."
