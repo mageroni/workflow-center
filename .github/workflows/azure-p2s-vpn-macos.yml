@@ -663,55 +663,116 @@ jobs:
         echo "Current routing table:"
         netstat -rn | head -10 || true
         
+        # Prepare for OpenVPN startup - ensure proper permissions and directories
+        echo "Preparing OpenVPN startup environment..."
+        
+        # Create a user-writable PID directory (avoid /var/run which may have permission issues)
+        PID_DIR="$HOME/.openvpn"
+        LOG_DIR="$HOME/.openvpn"
+        mkdir -p "$PID_DIR" "$LOG_DIR"
+        
+        PID_FILE="$PID_DIR/openvpn.pid"
+        LOG_FILE="$LOG_DIR/openvpn.log"
+        
+        echo "Using PID file: $PID_FILE"
+        echo "Using log file: $LOG_FILE"
+        
+        # Clean up any existing PID/log files
+        rm -f "$PID_FILE" "$LOG_FILE"
+        
         # Start OpenVPN connection in the background
         echo "Starting OpenVPN connection..."
-        echo "Command: sudo openvpn --config ~/vpn-client.ovpn --daemon --log /var/log/openvpn.log --writepid /var/run/openvpn.pid --verb 3"
+        echo "Command: sudo openvpn --config ~/vpn-client.ovpn --daemon --log $LOG_FILE --writepid $PID_FILE --verb 3"
         
+        # First try to start OpenVPN and capture any immediate errors
         if sudo openvpn --config ~/vpn-client.ovpn \
           --daemon \
-          --log /var/log/openvpn.log \
-          --writepid /var/run/openvpn.pid \
+          --log "$LOG_FILE" \
+          --writepid "$PID_FILE" \
           --verb 3; then
-          echo "✅ OpenVPN command executed successfully"
+          echo "✅ OpenVPN daemon command executed successfully"
         else
           EXIT_CODE=$?
-          echo "❌ OpenVPN command failed with exit code: $EXIT_CODE"
+          echo "❌ OpenVPN daemon command failed with exit code: $EXIT_CODE"
           
-          # Immediate diagnostics
-          echo "Immediate post-failure diagnostics:"
-          echo "PID file exists: $(test -f /var/run/openvpn.pid && echo 'YES' || echo 'NO')"
-          echo "Log file exists: $(test -f /var/log/openvpn.log && echo 'YES' || echo 'NO')"
+          # Try to get immediate error information by running in foreground briefly
+          echo "Attempting foreground startup for immediate error diagnosis..."
+          echo "Running: sudo openvpn --config ~/vpn-client.ovpn --verb 4"
           
-          if [ -f /var/log/openvpn.log ]; then
-            echo "OpenVPN log content:"
-            sudo cat /var/log/openvpn.log
-          fi
+          # Use a background process that we can kill after a few seconds
+          sudo openvpn --config ~/vpn-client.ovpn --verb 4 > "$LOG_DIR/foreground.log" 2>&1 &
+          FOREGROUND_PID=$!
           
-          # Try running OpenVPN in foreground for immediate error output
-          echo "Attempting to run OpenVPN in foreground for immediate error diagnosis..."
-          timeout 10 sudo openvpn --config ~/vpn-client.ovpn --verb 4 || echo "Foreground test completed/timed out"
+          # Wait a few seconds to capture startup errors
+          sleep 5
+          
+          # Kill the foreground process
+          sudo kill $FOREGROUND_PID 2>/dev/null || true
+          wait $FOREGROUND_PID 2>/dev/null || true
+          
+          echo "Foreground startup log:"
+          cat "$LOG_DIR/foreground.log" 2>/dev/null || echo "No foreground log available"
           
           exit $EXIT_CODE
         fi
         
-        # Give OpenVPN a moment to start
-        sleep 3
+        # Give OpenVPN a moment to start and create PID file
+        echo "Waiting for OpenVPN to initialize..."
+        sleep 5
         
         # Post-startup diagnostics
         echo "Post-startup diagnostics:"
-        echo "PID file exists: $(test -f /var/run/openvpn.pid && echo 'YES' || echo 'NO')"
-        echo "Log file exists: $(test -f /var/log/openvpn.log && echo 'YES' || echo 'NO')"
+        echo "PID file exists: $(test -f "$PID_FILE" && echo 'YES' || echo 'NO')"
+        echo "Log file exists: $(test -f "$LOG_FILE" && echo 'YES' || echo 'NO')"
         
-        if [ -f /var/run/openvpn.pid ]; then
-          PID=$(cat /var/run/openvpn.pid)
+        # Check if PID file was created
+        if [ ! -f "$PID_FILE" ]; then
+          echo "❌ OpenVPN PID file was not created"
+          echo "This indicates OpenVPN failed to start or exited immediately"
+          
+          # Check for log file content
+          if [ -f "$LOG_FILE" ]; then
+            echo "OpenVPN log content:"
+            cat "$LOG_FILE"
+          else
+            echo "No log file was created"
+          fi
+          
+          # Check for any OpenVPN processes that might be running
+          OPENVPN_PROCESSES=$(ps aux | grep -v grep | grep openvpn || true)
+          if [ -n "$OPENVPN_PROCESSES" ]; then
+            echo "Found running OpenVPN processes:"
+            echo "$OPENVPN_PROCESSES"
+          else
+            echo "No OpenVPN processes found running"
+          fi
+          
+          echo "❌ OpenVPN startup failed - exiting"
+          exit 1
+        fi
+        
+        # Read PID and verify process is running
+        if [ -f "$PID_FILE" ]; then
+          PID=$(cat "$PID_FILE")
           echo "OpenVPN PID: $PID"
           echo "Process running: $(kill -0 $PID 2>/dev/null && echo 'YES' || echo 'NO')"
           echo "Process details: $(ps -p $PID 2>/dev/null || echo 'Process not found')"
+          
+          if ! kill -0 $PID 2>/dev/null; then
+            echo "❌ OpenVPN process is not running despite PID file existing"
+            echo "Process may have crashed immediately after startup"
+            
+            if [ -f "$LOG_FILE" ]; then
+              echo "OpenVPN log content:"
+              cat "$LOG_FILE"
+            fi
+            exit 1
+          fi
         fi
         
-        if [ -f /var/log/openvpn.log ]; then
+        if [ -f "$LOG_FILE" ]; then
           echo "Initial OpenVPN log content:"
-          sudo cat /var/log/openvpn.log
+          cat "$LOG_FILE"
         fi
         
         # Wait for connection to establish
@@ -723,8 +784,8 @@ jobs:
           echo "Connection attempt $((timeout_counter/2 + 1)) - checking status..."
           
           # Check if OpenVPN process is running
-          if [ -f /var/run/openvpn.pid ]; then
-            PID=$(cat /var/run/openvpn.pid)
+          if [ -f "$PID_FILE" ]; then
+            PID=$(cat "$PID_FILE")
             if kill -0 $PID 2>/dev/null; then
               echo "✅ OpenVPN process is running (PID: $PID)"
               
@@ -759,9 +820,9 @@ jobs:
             else
               echo "❌ OpenVPN PID file exists but process is not running"
               # Check why the process died
-              if [ -f /var/log/openvpn.log ]; then
+              if [ -f "$LOG_FILE" ]; then
                 echo "Recent OpenVPN log entries:"
-                sudo tail -10 /var/log/openvpn.log
+                tail -10 "$LOG_FILE"
               fi
               break
             fi
@@ -777,9 +838,9 @@ jobs:
           fi
           
           # Show current log tail for debugging
-          if [ -f /var/log/openvpn.log ] && [ $((timeout_counter % 10)) -eq 0 ]; then
+          if [ -f "$LOG_FILE" ] && [ $((timeout_counter % 10)) -eq 0 ]; then
             echo "Recent log entries (every 10 seconds):"
-            sudo tail -5 /var/log/openvpn.log
+            tail -5 "$LOG_FILE"
           fi
           
           sleep 2
@@ -792,8 +853,8 @@ jobs:
           echo "Final diagnostics:"
           
           # Final process check
-          if [ -f /var/run/openvpn.pid ]; then
-            PID=$(cat /var/run/openvpn.pid)
+          if [ -f "$PID_FILE" ]; then
+            PID=$(cat "$PID_FILE")
             echo "PID file contents: $PID"
             echo "Process status: $(kill -0 $PID 2>/dev/null && echo 'RUNNING' || echo 'NOT RUNNING')"
             if kill -0 $PID 2>/dev/null; then
@@ -807,7 +868,7 @@ jobs:
           
           # Full log dump
           echo "Complete OpenVPN log:"
-          sudo cat /var/log/openvpn.log 2>/dev/null || echo "No log file found"
+          cat "$LOG_FILE" 2>/dev/null || echo "No log file found"
           
           # System diagnostics
           echo "System diagnostics:"
@@ -898,9 +959,12 @@ jobs:
         
         # Display VPN statistics if available
         echo "VPN Connection Statistics:"
-        if [ -f /var/log/openvpn.log ]; then
+        LOG_FILE="$HOME/.openvpn/openvpn.log"
+        if [ -f "$LOG_FILE" ]; then
           echo "Recent OpenVPN log entries:"
-          tail -20 /var/log/openvpn.log
+          tail -20 "$LOG_FILE"
+        else
+          echo "No OpenVPN log file found"
         fi
 
     - name: Disconnect VPN (Cleanup)
@@ -908,9 +972,12 @@ jobs:
       run: |
         echo "Disconnecting VPN connection..."
         
+        # Use the same PID file location as during startup
+        PID_FILE="$HOME/.openvpn/openvpn.pid"
+        
         # Stop OpenVPN if running
-        if [ -f /var/run/openvpn.pid ]; then
-          VPN_PID=$(cat /var/run/openvpn.pid)
+        if [ -f "$PID_FILE" ]; then
+          VPN_PID=$(cat "$PID_FILE")
           if kill -0 $VPN_PID 2>/dev/null; then
             echo "Stopping OpenVPN process (PID: $VPN_PID)..."
             sudo kill $VPN_PID
@@ -922,7 +989,7 @@ jobs:
               sudo kill -9 $VPN_PID
             fi
           fi
-          sudo rm -f /var/run/openvpn.pid
+          rm -f "$PID_FILE"
         fi
         
         # Clean up any remaining OpenVPN processes
@@ -996,8 +1063,9 @@ jobs:
         rm -rf OpenVPN/
         rm -rf Generic/
         
-        # Clean up OpenVPN logs and PID files
-        sudo rm -f /var/log/openvpn.log
-        sudo rm -f /var/run/openvpn.pid
+        # Clean up OpenVPN logs and PID files (both old and new locations)
+        rm -rf $HOME/.openvpn/
+        sudo rm -f /var/log/openvpn.log 2>/dev/null || true
+        sudo rm -f /var/run/openvpn.pid 2>/dev/null || true
         
         echo "Cleanup completed"
