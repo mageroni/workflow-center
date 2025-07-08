@@ -43,11 +43,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Check Runner Public IP
-      run: |
-        echo "Checking public IP address of the runner..."
-        curl ifconfig.me
-
     - name: Install OpenVPN
       run: |
         echo "Installing OpenVPN via Homebrew..."
@@ -78,23 +73,21 @@ jobs:
         az account set --subscription ${{ env.AZURE_SUBSCRIPTION_ID }}
         az account show
 
-    - name: Generate P2S VPN Client Configuration
+    - name: Download P2S VPN Client Configuration
       id: vpn-config
       run: |
-        echo "Generating P2S VPN client configuration..."
+        echo "Downloading P2S VPN client configuration from Azure Storage..."
         
-        # Generate VPN client configuration package
-        config_url=$(az network vnet-gateway vpn-client generate \
-          --resource-group ${{ env.RESOURCE_GROUP }} \
-          --name ${{ env.VPN_GATEWAY_NAME }} \
-          --authentication-method EAPTLS \
-          --query 'value' -o tsv)
+        # Download VPN client configuration package from Azure Storage Account
+        echo "Downloading VNet-Gateway.zip from Azure Storage Account 'vpnpackageworkflowcenter'..."
+        az storage blob download \
+          --account-name vpnpackageworkflowcenter \
+          --container-name vpn \
+          --name VNet-Gateway.zip \
+          --file vpn-client-config.zip \
+          --auth-mode login
         
-        echo "VPN Client configuration URL: $config_url"
-        echo "vpn_config_url=$config_url" >> $GITHUB_OUTPUT
-        
-        # Download the configuration package
-        curl -L -o vpn-client-config.zip "$config_url"
+        echo "VPN Client configuration downloaded successfully"
         
         # Extract the configuration
         unzip -q vpn-client-config.zip
