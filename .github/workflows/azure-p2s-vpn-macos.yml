@@ -25,12 +25,17 @@ on:
         required: false
         type: boolean
         default: false
+      private_app_service_url:
+        description: 'Private App Service URL to test connectivity (e.g., https://myapp.azurewebsites.net)'
+        required: false
+        type: string
 
 env:
   AZURE_SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
   RESOURCE_GROUP: ${{ inputs.resource_group }}
   VPN_GATEWAY_NAME: ${{ inputs.vpn_gateway_name }}
   CLIENT_CERT_NAME: ${{ inputs.client_certificate_name }}
+  PRIVATE_APP_SERVICE_URL: ${{ inputs.private_app_service_url }}
 
 jobs:
   setup-p2s-vpn:
@@ -170,39 +175,183 @@ jobs:
         if [ -n "${{ steps.client-certs.outputs.client_cert_path }}" ]; then
           echo "cert ${{ steps.client-certs.outputs.client_cert_path }}" >> ~/vpn-client.ovpn
           echo "key ${{ steps.client-certs.outputs.client_key_path }}" >> ~/vpn-client.ovpn
+          # Remove auth-user-pass since we're using certificate authentication
+          sed -i '' '/auth-user-pass/d' ~/vpn-client.ovpn
+        fi
+        
+        echo "OpenVPN configuration file created:"
+        cat ~/vpn-client.ovpn
+
+    - name: Establish VPN Connection
+      id: vpn-connect
+      run: |
+        echo "Establishing VPN connection..."
+        
+        if [ ! -f ~/vpn-client.ovpn ]; then
+          echo "Error: OpenVPN configuration file not found!"
+          exit 1
+        fi
+        
+        # Create OpenVPN log directory
+        sudo mkdir -p /var/log
+        
+        # Start OpenVPN connection in the background
+        echo "Starting OpenVPN connection..."
+        sudo openvpn --config ~/vpn-client.ovpn \
+          --daemon \
+          --log /var/log/openvpn.log \
+          --writepid /var/run/openvpn.pid \
+          --verb 3
+        
+        # Wait for connection to establish
+        echo "Waiting for VPN connection to establish (timeout: 30 seconds)..."
+        timeout_counter=0
+        max_timeout=30
+        
+        while [ $timeout_counter -lt $max_timeout ]; do
+          # Check if OpenVPN process is running
+          if [ -f /var/run/openvpn.pid ] && kill -0 $(cat /var/run/openvpn.pid) 2>/dev/null; then
+            # Check if tun interface is up
+            if ifconfig | grep -q "utun"; then
+              echo "VPN connection established successfully!"
+              echo "vpn_connected=true" >> $GITHUB_OUTPUT
+              
+              # Display network information
+              echo "Network interfaces:"
+              ifconfig | grep -A 5 "utun"
+              
+              echo "Routing table:"
+              netstat -rn | head -20
+              
+              # Get VPN IP address
+              VPN_IP=$(ifconfig | grep -A 1 "utun" | grep "inet " | awk '{print $2}' | head -1)
+              echo "VPN IP Address: $VPN_IP"
+              echo "vpn_ip=$VPN_IP" >> $GITHUB_OUTPUT
+              
+              break
+            fi
+          fi
+          
+          sleep 2
+          timeout_counter=$((timeout_counter + 2))
+          echo "Waiting... ($timeout_counter/$max_timeout seconds)"
+        done
+        
+        if [ $timeout_counter -ge $max_timeout ]; then
+          echo "VPN connection failed to establish within timeout period"
+          echo "OpenVPN log:"
+          sudo cat /var/log/openvpn.log 2>/dev/null || echo "No log file found"
+          echo "vpn_connected=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+
+    - name: Test Private App Service Connectivity
+      if: ${{ env.PRIVATE_APP_SERVICE_URL != '' }}
+      run: |
+        echo "Testing connectivity to private App Service..."
+        
+        if [ "${{ steps.vpn-connect.outputs.vpn_connected }}" != "true" ]; then
+          echo "Skipping App Service test - VPN not connected"
+          exit 1
+        fi
+        
+        APP_SERVICE_URL="${{ env.PRIVATE_APP_SERVICE_URL }}"
+        echo "Testing connectivity to: $APP_SERVICE_URL"
+        
+        # Extract hostname for DNS resolution test
+        HOSTNAME=$(echo "$APP_SERVICE_URL" | sed 's|https\?://||' | cut -d'/' -f1)
+        echo "Hostname: $HOSTNAME"
+        
+        # Test DNS resolution
+        echo "Testing DNS resolution..."
+        if nslookup "$HOSTNAME"; then
+          echo "DNS resolution successful"
+        else
+          echo "DNS resolution failed"
+        fi
+        
+        # Test HTTP connectivity with timeout
+        echo "Testing HTTP connectivity..."
+        if curl -s --max-time 30 --connect-timeout 10 -I "$APP_SERVICE_URL"; then
+          echo "✅ Successfully connected to private App Service!"
+          
+          # Get detailed response
+          echo "Detailed response:"
+          curl -s --max-time 30 --connect-timeout 10 "$APP_SERVICE_URL" | head -20
+          
+        else
+          echo "❌ Failed to connect to private App Service"
+          echo "This might be due to:"
+          echo "1. App Service not configured for private endpoints"
+          echo "2. Network Security Group rules blocking access"
+          echo "3. App Service firewall settings"
+          echo "4. Incorrect URL or App Service not running"
+          
+          # Additional debugging
+          echo "Network diagnostics:"
+          echo "Current routing table:"
+          netstat -rn
+          
+          exit 1
         fi
 
     - name: Test VPN Connection (Optional)
-      if: ${{ github.event.inputs.test_connection == 'true' }}
+      if: ${{ github.event.inputs.test_connection == 'true' && steps.vpn-connect.outputs.vpn_connected == 'true' }}
       run: |
-        echo "Testing VPN connection..."
+        echo "Running additional VPN connection tests..."
         
-        # Note: This is a basic connectivity test
-        # In a real scenario, you might want to connect and test specific resources
+        # Test basic connectivity
+        echo "Testing basic network connectivity..."
         
-        if [ -f ~/vpn-client.ovpn ]; then
-          echo "OpenVPN configuration file created successfully"
-          echo "Configuration file contents:"
-          cat ~/vpn-client.ovpn
-          
-          # Test configuration syntax
-          sudo openvpn --config ~/vpn-client.ovpn --verb 3 --connect-timeout 10 &
-          VPN_PID=$!
-          
-          # Wait a moment for connection attempt
-          sleep 15
-          
-          # Check if VPN process is still running
-          if kill -0 $VPN_PID 2>/dev/null; then
-            echo "VPN connection appears to be establishing..."
-            # Kill the process for this test
-            sudo kill $VPN_PID
-          else
-            echo "VPN connection test completed"
-          fi
+        # Test ping to Azure DNS
+        echo "Testing ping to Azure DNS (168.63.129.16)..."
+        if ping -c 4 168.63.129.16; then
+          echo "✅ Azure DNS reachable"
         else
-          echo "No OpenVPN configuration file found to test"
+          echo "❌ Azure DNS not reachable"
         fi
+        
+        # Test connectivity to Azure public endpoints
+        echo "Testing connectivity to Azure public endpoints..."
+        if curl -s --max-time 10 https://management.azure.com > /dev/null; then
+          echo "✅ Azure Management API reachable"
+        else
+          echo "❌ Azure Management API not reachable"
+        fi
+        
+        # Display VPN statistics if available
+        echo "VPN Connection Statistics:"
+        if [ -f /var/log/openvpn.log ]; then
+          echo "Recent OpenVPN log entries:"
+          tail -20 /var/log/openvpn.log
+        fi
+
+    - name: Disconnect VPN (Cleanup)
+      if: always()
+      run: |
+        echo "Disconnecting VPN connection..."
+        
+        # Stop OpenVPN if running
+        if [ -f /var/run/openvpn.pid ]; then
+          VPN_PID=$(cat /var/run/openvpn.pid)
+          if kill -0 $VPN_PID 2>/dev/null; then
+            echo "Stopping OpenVPN process (PID: $VPN_PID)..."
+            sudo kill $VPN_PID
+            sleep 5
+            
+            # Force kill if still running
+            if kill -0 $VPN_PID 2>/dev/null; then
+              echo "Force stopping OpenVPN process..."
+              sudo kill -9 $VPN_PID
+            fi
+          fi
+          sudo rm -f /var/run/openvpn.pid
+        fi
+        
+        # Clean up any remaining OpenVPN processes
+        sudo pkill -f openvpn || true
+        
+        echo "VPN disconnected"
 
     - name: Save VPN Configuration Artifacts
       uses: actions/upload-artifact@v4
@@ -229,11 +378,32 @@ jobs:
         echo "Required secrets for this workflow:"
         echo "- AZURE_CLIENT_ID: Azure service principal client ID"
         echo "- AZURE_TENANT_ID: Azure tenant ID"
-        echo "- P2S_CLIENT_CERT: Base64 encoded client certificate (optional)"
-        echo "- P2S_CLIENT_KEY: Base64 encoded client private key (optional)"
+        echo "- P2S_CLIENT_CERT: Base64 encoded client certificate (required)"
+        echo "- P2S_CLIENT_KEY: Base64 encoded client private key (required)"
         echo ""
-        echo "Note: Ensure your Azure VPN Gateway is configured for P2S connections"
-        echo "with the appropriate authentication method (certificate or Azure AD)."
+        echo "Required inputs for this workflow:"
+        echo "- azure_subscription_id: Your Azure subscription ID"
+        echo "- resource_group: Resource group containing the VPN Gateway"
+        echo "- vpn_gateway_name: Name of your Virtual Network Gateway"
+        echo "- private_app_service_url: URL of your private App Service (optional)"
+        echo ""
+        echo "Prerequisites:"
+        echo "- Azure VPN Gateway configured for P2S certificate authentication"
+        echo "- Root certificate uploaded to the VPN Gateway"
+        echo "- VNet-Gateway.zip uploaded to storage account 'vpnpackageworkflowcenter'"
+        echo "- Private App Service configured with VNet integration (if testing connectivity)"
+        echo ""
+        if [ -n "${{ env.PRIVATE_APP_SERVICE_URL }}" ]; then
+          if [ "${{ steps.vpn-connect.outputs.vpn_connected }}" == "true" ]; then
+            echo "✅ VPN Connection Status: Connected"
+            echo "✅ Private App Service URL: ${{ env.PRIVATE_APP_SERVICE_URL }}"
+            echo "✅ VPN IP Address: ${{ steps.vpn-connect.outputs.vpn_ip }}"
+          else
+            echo "❌ VPN Connection Status: Failed"
+          fi
+        else
+          echo "ℹ️  No private App Service URL provided for testing"
+        fi
         echo ""
         echo "Security reminder: The configuration files contain sensitive information."
         echo "Handle them securely and delete them when no longer needed."
@@ -248,3 +418,9 @@ jobs:
         rm -f vpn-client-config.zip
         rm -rf OpenVPN/
         rm -rf Generic/
+        
+        # Clean up OpenVPN logs and PID files
+        sudo rm -f /var/log/openvpn.log
+        sudo rm -f /var/run/openvpn.pid
+        
+        echo "Cleanup completed"
